@@ -1,16 +1,26 @@
 脑裂：
 
+
 防脑裂;
 1,多个网络线路检查，确保不是网络通信之间不能通信造成的假死
-2，将原master shutdown干净（让原master真死），并将新master的变更确保通知到各方。（这段时间系统可能不可用）
+2，将原master shutdown干净（让原master真死），并将新master的变更确保通知到各方。在通知到各方之前这段时间内系统可能不可用。（比如
+在ElasticSearch里：
+对于一个具有全功能的ES节点，必须要有一个活动的Master节点。
+ES1.4.0.Beta1后，新增了一项没有Master时阻塞集群操作设置：discovery.zen.no_master_block。
+当集群中没有活动的Master节点后，该设置指定了哪些操作（read、write）需要被拒绝（即阻塞执行）。有两个设置值：all和write，默认为wirte。
+除了阻塞外，是否可以根据需求和具体环境加入一个队列，将这段时间内的操作加入队列内，然后新master好了后，在同步，做到最终一致？
+）
+
+
 
 最彻底解决脑裂：
 将master HA集群做成peer2peer（P2P）的。每个节点都是对等的没有主次，这样就不会存在脑裂的问题，但是这种ha解决方案需要使用
-两阶段，
+两阶段
 paxos
 这类
 数据一致性保证协议
-来实现。如果系统中主要是对master的读取操作，很少更新就很适合了。（比如ElasticSearch）
+来实现。如果系统中主要是对master的读取操作，很少更新就很适合了。（比如ElasticSearch：）
+
 
 
 
