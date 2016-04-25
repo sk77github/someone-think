@@ -3,7 +3,8 @@
 
 防脑裂;
 1,多个网络线路检查，确保不是网络通信之间不能通信造成的假死
-2，将原master shutdown干净（让原master真死），并将新master的变更确保通知到各方。在通知到各方之前这段时间内系统可能不可用。（比如
+2，保证强一致性，要求同一时刻只有同一台机器提供写服务。将原master shutdown干净（让原master真死），并将新master的变更确保通知到各方。
+在通知到各方之前这段时间内系统可能不可用。（比如
 在ElasticSearch里：
 对于一个具有全功能的ES节点，必须要有一个活动的Master节点。
 ES1.4.0.Beta1后，新增了一项没有Master时阻塞集群操作设置：discovery.zen.no_master_block。
@@ -26,3 +27,14 @@ paxos
 
 mha的防脑裂：
 https://github.com/sk77github/software/blob/master/mysql-ha
+
+
+
+
+
+分布式环境判断的推模式与拉模式：
+MHA属于拉模式，mha要获取mysql master的信息。
+zookeeper（分布式锁）属于推模式，mysql或者其他软件需要向zookeeper注册，抢锁。（分布式锁服务实现主节点选举大致如下：
+主节点和备节点到Chubby中抢锁，抢到锁的节点在锁的有效期(Lease期)内提供服务，当主节点锁的Lease快要到期时，主节点申请延长锁的超时时间，
+正常情况下分布式锁服务总是优先满足主节点的请求，当主节点出现故障时，备节点能够抢到锁切换为主节点提供服务。
+）
