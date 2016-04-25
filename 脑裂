@@ -1,4 +1,18 @@
 脑裂：
 
+防脑裂;
+1,多个网络线路检查，确保不是网络通信之间不能通信造成的假死
+2，将原master shutdown干净（让原master真死），并将新master的变更确保通知到各方。（这段时间系统可能不可用）
+
+最彻底解决脑裂：
+将master HA集群做成peer2peer（P2P）的。每个节点都是对等的没有主次，这样就不会存在脑裂的问题，但是这种ha解决方案需要使用
+两阶段，
+paxos
+这类
+数据一致性保证协议
+来实现。如果系统中主要是对master的读取操作，很少更新就很适合了。（比如ElasticSearch）
+
+
+
 mha的防脑裂：
 https://github.com/sk77github/software/blob/master/mysql-ha
