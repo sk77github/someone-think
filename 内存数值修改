@@ -1,0 +1,489 @@
+游戏外挂原理解析与制作 - [内存数值修改类 篇一]
+
+　　本章旨在讲解外挂实现原理，未深入涉及至代码层面。希望能与对这方面感兴趣的朋友多多交流，毕竟理论是死的，套路是固定的，只有破解经验是花大量时间和心血积累的。
+
+对于单机游戏而言，游戏中绝大部分的参数(比如血、蓝、能量亦或是金币)都存储在计算机的堆栈中，一些类似剧情进度的则加密后写入本地的自定义配置文件中；
+对于页游、网游和手游，虽然服务器保存了大量的重要的参数，但由于客户端不可避免的需要进行大量的计算和资源的加载，本地内存种必定存有部分的临时变量，通过判断这些变量的变化规律和函数的破密寻到利于自身的参数，比如伤害值一类，继而寻找该变量的内存地址，根据指针偏移分析获得内存基址，再提升权限利用Windows API把自定义数值写入该内存块，就完成了修改某项数值的操作，一般来说，只要破解了一项数值，利用规律继而破解其他数值就更加容易了。
+　　  一般套路就是上述，一些防护性强大的游戏会在上述的每一步中都设置难题，等着我们去破解。
+
+ 
+
+　　  在此之前，我们来了解一些基础知识：
+
+数据类型：游戏中的血量、蓝、生命值，我们将他们称之为变量，变量包含了变量名称和数据类型，那么它的名字就是"血量、生命值"等等，而它的数据类型决定了数值以何种方式存储到计算机的内存中，想要找到自身需要的变量，如果可以确定这个变量的数据类型或者有根据的推测来缩小变量的数据类型范围，那么对于快速定位该变量是具有帮助性的。以下是几种常见的变量类型：
+　　　整数型：游戏中比如血量、法力可能用到这种类型。
+
+　　　字节型：根据不同的编辑器，1个整形占用N个字节(N>1)，一般很早之前出产的GBA游戏为了节省开销会用到这种类型。
+
+　　　浮点型：带有小数点的数字，如果金币或者伤害值带有小数点，那很可能是这种数据类型保存的。
+
+　　　文本型：比如世界喊话，人物命名，一般采用文本型保存这类数据。
+
+　　　推荐阅读《数据结构》相关书籍更好的熟悉数据结构，有编程经验的就不必多说了。
+
+ 
+
+进程：每一个应用程序/游戏启动，都会产生至少一个进程Process，在任务管理器里可以看到进程名称和进程PID。
+　　　
+
+ 
+
+句柄：英文HANDLE，一个整数值。数据的地址需要变动，变动以后就需要有人来记录管理变动，就好像户籍管理一样，因此系统用句柄来记载数据地址的变更。肉眼看到的一个个文件夹，窗口，按钮，图标，应用程序能够通过句柄访问相应的对象的信息
+　　推荐阅读《计算机操作系统》相关书籍更多的了解计算机原理。
+
+　　
+
+　　进入正题，根据目的反向推导下需要得到哪些信息，我们最终才能想要实现修改数值。
+
+　　修改变量的数值→得先找到存储变量的内存地址→得先找到游戏窗口的句柄→得先找到游戏的进程。
+
+　　根据什么依据推导出的路线呢？
+
+ 
+
+　　Windows系统库的kernel32.dll库文件中包含了内存操作的API，其中VirtualQueryEx用于查询地址空间中内存地址的信息。
+
+ 　　函数原型：
+
+复制代码
+  /// <summary>
+  /// 查询地址空间中内存地址存储的信息
+  /// </summary>
+  /// <param name="hProcess">句柄</param>
+  /// <param name="lpAddress">内存地址</param>
+  /// <param name="lpBuffer">结构体指针</param>
+  /// <param name="dwLength">结构体大小</param>
+  /// <returns>写入字节数</returns>
+  [DllImport("kernel32.dll")]     
+      public static extern int VirtualQueryEx(
+      IntPtr hProcess, 
+      IntPtr lpAddress, 
+      out MEMORY_BASIC_INFORMATION lpBuffer, 
+      int dwLength);
+复制代码
+　　我们下面逐个分析参数：
+
+　　hProcess：顾名思义，进程句柄，也就是说想要查询地址存放的信息，首先得获得进程的句柄。
+
+　　lpAddress：查询的内存地址，输入参数，需要主动提供地址。但我们并不知道我们需要的数值它被存放的地址，我们只能一个页面一个页面的猜测，直到扫描到某个页面的某块内存里面存放的信息正是与我们需要的信息一致或是存在一定的函数关系。其次，对于同一个数值也许出现在多个地方，比如 在某个时间区间人物的攻击数值和防御数值等同都为1200，那么说明至少有两个地址存放了这个数据。我们需要把这些地址全都筛选出来。
+
+　　lpBuffer：结构体指针，用于存放内存信息。
+
+　　dwLength：上述结构体的大小。
+
+　　返回值：函数写入lpBuffer的字节数，如果字节数等于结构体PMEMORY_BASIC_INFORMATION的大小，表示函数执行成功。
+
+ 
+
+　　但此函数只负责获取内存信息，而查询内存信息中具体存放数值则用到另一函数ReadProcessMemory，来看一下函数原型：
+
+复制代码
+      /// <summary>
+      /// 根据进程句柄读入该进程的某个内存空间
+      /// </summary>
+      /// <param name="lpProcess">进程句柄</param>
+      /// <param name="lpBaseAddress">内存读取的起始地址</param>
+      /// <param name="lpBuffer">写入地址</param>
+      /// <param name="nSize">写入字节数</param>
+      /// <param name="BytesRead">实际传递的字节数</param>
+      /// <returns>读取结果</returns>
+      [DllImportAttribute("kernel32.dll", EntryPoint = "ReadProcessMemory")]
+      public static extern bool ReadProcessMemory
+      (
+          IntPtr lpProcess,
+          IntPtr lpBaseAddress,
+          IntPtr lpBuffer,
+          int nSize,
+          IntPtr BytesRead
+      );    
+复制代码
+ 
+
+　　此函数将根据句柄读取该进程的某个内存空间，并将读取到的字节数写入到我们开辟的一块空间中，而此空间存放的正是我们苦苦追寻的“有意义的数值”。此函数的部分参数依赖于上一个函数VirtualQueryEx产生的结果。
+
+ 
+
+　　根据上面的API，先来看怎么获取第一个参数:窗体句柄，同样的kernel32.dll提供了名为OpenProcess的函数用来打开一个已存在的进程对象，并返回进程的句柄。
+
+　　函数原型：
+
+复制代码
+  /// <summary>
+  /// 打开一个已存在的进程对象，并返回进程的句柄
+  /// </summary>
+  /// <param name="iAccess">渴望得到的访问权限</param>
+  /// <param name="Handle">是否继承句柄</param>
+  /// <param name="ProcessID">进程PID</param>
+  /// <returns>进程的句柄</returns>
+  [DllImportAttribute("kernel32.dll", EntryPoint = "OpenProcess")]
+  public static extern IntPtr OpenProcess
+  (
+      int iAccess,
+      bool Handle,
+      int ProcessID
+  );
+复制代码
+　　dwDesiredAccess ：渴望得到的访问权限，这里默认填写PROCESS_ALL_ACCESS | 0x1F0FFF 给予所有可能允许的权限。
+
+　　bInheritHandle ：是否继承句柄，FALSE即可。
+
+　　dwProcessId ：进程标示符PID。
+
+ 
+
+　　对于进程PID各种编程语言有自己的获取方式，以C#语言为例(针对非多开客户端)：
+
+复制代码
+  //根据进程名称获取PID
+  public int GetPIDByPName(string ProcessName)
+      {
+          Process[] ArrayProcess = Process.GetProcessesByName(processName);
+        foreach (Process pro in ArrayProcess)
+        {
+            return pro.Id;
+        }
+        return -1;
+    }
+复制代码
+　　我们获取到进程的PID以后，就可以调用OpenProcess获取窗体的句柄，然后利用函数VirtualQueryEx遍历内存查找地址信息，根据地址利用ReadProcessMemory查找具体存放的值，最后利用WriteProcessMemory把修改后的值写入该地址，这样就完成了一次数据的修改。来看一下API的函数原型：
+
+复制代码
+  /// <summary>
+  /// 写入某一进程的内存区域
+  /// </summary>
+  /// <param name="lpProcess">进程句柄</param>
+  /// <param name="lpBaseAddress">写入的内存首地址</param>
+  /// <param name="lpBuffer">写入数据的指针</param>
+  /// <param name="nSize">写入字节数</param>
+  /// <param name="BytesWrite">实际写入字节数的指针</param>
+  /// <returns>大于0代表成功</returns>
+  [DllImportAttribute("kernel32.dll", EntryPoint = "WriteProcessMemory")]
+  public static extern bool WriteProcessMemory
+      (
+          IntPtr lpProcess,
+          IntPtr lpBaseAddress,
+          int [] lpBuffer,
+          int nSize,
+          IntPtr BytesWrite
+      );
+复制代码
+　　参数就不再一一解释了，注释都有，最后一个参数默认填写Null或者IntPtr.ZeroI即可。
+
+　　到了这里，修改游戏数值的原理和套路已经很明白了，甚至脱离游戏来讲，任何的应用如果没有对缓存中的数据进行良好的加密，都是存在很大的风险隐患的，这一章节主要了解一些常用到的名词和API的运用。具体如何利用代码进行调用API，以及更详细的剖析每一步的逻辑，将在下一章节讲述。
+
+　　PS：转载请附带原文路径：http://www.cnblogs.com/lene-y/p/7096485.html 。
+  
+  
+  
+  
+  
+  二，
+  游戏外挂原理解析与制作 - [内存数值修改类 篇二]
+
+　　本章旨在讲解如何利用高级语言根据变量数值寻找内存地址。涉及代码以C#为例。
+
+　　我用C#写了一个WinForm形式的Demo，界面如下：
+
+　　
+
+　　源代码：
+
+复制代码
+        //血量初始值
+        private int value = 1000;
+
+        public Form1()
+        {
+            InitializeComponent();
+        }
+
+        /// <summary>
+        /// 刷新界面：将最新的血量显示在界面
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private void btn_refresh_Click(object sender, EventArgs e)
+        {
+            this.label_display.Text = value.ToString();
+        }
+
+        /// <summary>
+        /// 更新血量：将自定义的数值写入血量变量
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private void btn_update_Click(object sender, EventArgs e)
+        {
+            int iVaule = -1;
+            bool ParseResult = int.TryParse(this.textBox_value.Text,out iVaule);
+            if (ParseResult)
+            {
+                value = iVaule;
+                this.label_display.Text = this.textBox_value.Text;
+            }
+        }    
+    
+复制代码
+　　很简单的一个Demo：一个名为value的变量，整数型，赋予其初始值1000；两个按钮：修改按钮点击后把文本框的数值赋值给value，并且修改标签文本=修改后value的值；另一个刷新按钮，点下后更新标签文本=value的最新值。
+
+　　
+
+　　回顾上一章节，我们讲到查询数值的内存地址需要用到两个函数VirtualQueryEx和ReadProcessMemory：
+
+　　其中VirtualQueryEx的第三个参数是一个用于接收内存信息的结构体指针，来看一下组成这个结构体的成员
+
+复制代码
+        //接收内存信息的结构体
+        public struct MEMORY_BASIC_INFORMATION
+        {
+            //区域基地址
+            public int BaseAddress;
+            //分配基地址
+            public int AllocationBase;
+            //区域被初次保留时赋予的保护属性
+            public int AllocationProtect;
+            //区域大小
+            public int RegionSize;
+            //状态
+            public int State;
+            //保护属性
+            public int Protect;
+            //类型
+            public int lType;
+        }
+复制代码
+　　这些注释是我从百度百科上摘抄的，更准确的解释建议查阅MSDN的API，下面贴代码的时候我也会据我的理解去解释涉及到的成员，但还是建议深入学习计算机的操作系统原理才能真正掌握这些术语与它们的意义。特地贴出这一段是我认为这是整个外挂制作过程中最重要的一个步骤。套用我们现成的模板或者利用后续我也会提到的一系列辅助工具去完成外挂的制作，是很难成长的，一些知名的游戏靠工具搜索基址千难万难，只有慢慢的去理解这些API、了解寄存器和汇编语言，才能走的更远。
+
+ 
+
+　　原归正传，我就直接跟着实际测试来一步一步讲解：
+
+　　1). 打开测试程序
+
+　　
+
+　　程序的名称：WinMemory_Test
+
+　　
+
+　　2). 根据上一章节通过进程名称获取PID=7956
+
+　　
+
+　　3). 还是上一章节提到的通过PID=7956获取进程句柄Handle=1072
+
+　　
+
+　　4). 通过Handle循环遍历可读写内存地址，取得字节数组。
+
+复制代码
+ public void SearchAddress()
+        {
+            MEMORY_BASIC_INFORMATION MBInfo = new MEMORY_BASIC_INFORMATION();
+            //获取结构体大小[单次读取字节数]
+            int MBSize = Marshal.SizeOf(MBInfo);
+            //从0x00开始查询
+            StartAddress = 0x000000;
+            //实际读取的字节数
+            int ReadSize = 0;
+            //从0开始查询，直到查询到整形的最大值2147483647
+            while (StartAddress >= 0 && StartAddress <= 0x7fffffff && MBInfo.RegionSize >= 0)
+            {
+                //读取结果存入输出参数MBInfo
+                MBSize = VirtualQueryEx(hProcess, (IntPtr)StartAddress, out MBInfo, Marshal.SizeOf(MBInfo));
+                //如果实际读取到的字节数等于结构体MEMORY_BASIC_INFORMATION字节数，表示读取成功
+                if (MBSize == Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION)))
+                {
+                    //PAGE_READWRITE:允许读写的内存区。
+                    //MEM_COMMIT:已分配物理内存[要找的数值确定了,那么内存肯定提前分配了]。
+                    if (MBInfo.Protect == PAGE_READWRITE && MBInfo.State == MEM_COMMIT)
+                    {
+                        byte[] FindArray = new byte[MBInfo.RegionSize];
+                        //把读取到的字节写入上面定义的数组byData中
+                        if (ReadProcessMemory(hProcess, (IntPtr)StartAddress, FindArray, MBInfo.RegionSize, out ReadSize))
+                            //如果读取的字节数无误
+                            if (ReadSize == MBInfo.RegionSize)
+                            {
+                                //处理数据[对比分析]
+                                DealData(DataArray, StartAddress);
+                            }
+                    }
+                }
+                else
+                {
+                    break;
+                }
+                StartAddress += MBInfo.RegionSize;      
+            }
+            
+        }
+复制代码
+ 　　
+
+　　5). 将获取的字节数组转化整型与1000进行对比，将寻找到的所有结果保存到全局List.
+
+复制代码
+public void DealData(byte[] DataArray, int StartAddress)
+        {
+            byte[] intBuff = new byte[4];
+
+            for (int i = 0; i < DataArray.Length - 4; i++)
+            {
+                Array.Copy(DataArray, i, intBuff, 0, 4);
+                int num = BitConverter.ToInt32(intBuff, 0);
+                if (num == 1000)
+                {
+                    AddressList.Add(StartAddress + i);
+                }
+            }
+        }
+复制代码
+ 　　看一下结果：
+
+　　
+
+ 　　至此，Demo中整形数值等于1000的地址已经全部被我们找到了，下一章节讲解如何定位我们所要查找的那个“1000”以及修改其值。
+   
+   
+   三，
+   
+   上篇说到我们已经通过代码首次扫描，得到所有值=1000的内存地址，并将它们存入了集合中。
+
+　　附上链接：http://www.cnblogs.com/lene-y/p/7107526.html。
+
+　　
+
+　　Demo界面：
+
+　　　　
+
+　　
+
+　　首次扫描结果：
+
+　　　　
+
+　　　然后我们再从这32个结果中找到我们真正需要的那个变量地址。
+
+ 
+
+点击修改Button改变变量value的数值：
+　　
+
+　　此时变量value=789，我们通过再次读取32个结果地址中的数据来进一步筛选，进行二次搜索：
+
+复制代码
+        /// <summary>
+        /// 继续搜索
+        /// </summary>
+        /// <param name="Value">在这里填入改变后的数值</param>
+        public void ContinueSearch(int Value = 789)
+        {
+            int ReadSize = -1;
+            byte[] FindArray = new byte[4];
+            //临时地址字典 key=内存地址 value=存放数值
+            Dictionary<int,int> TempAddressList = new Dictionary<int,int>();
+            foreach (int Address in AddressList)
+            {
+                //因为知道是整数型，所以4字节确定了
+                if (ReadProcessMemory(hProcess, (IntPtr)Address, FindArray, 4, out ReadSize))
+                    //如果读取的字节数无误
+                    if (ReadSize == 4)
+                    {
+                        //处理数据[对比分析]
+                        if (CompareData(FindArray, Address, Value))
+                        {
+                            TempAddressList.Add(Address, Value);
+                        }
+                    }
+            }
+        }    
+复制代码
+　　取出值=789的地址：
+
+复制代码
+        /// <summary>
+        /// 再次对比第一次搜索结果的地址中存放的值与输入值是否一致
+        /// </summary>
+        /// <param name="DataArray">读取到的字节数组</param>
+        /// <param name="Address">地址</param>
+        /// <param name="Value">游戏中的实际数值</param>
+        /// <returns>是否一致</returns>
+        public bool CompareData(byte[] DataArray, int Address, int Value)
+        {
+            int num = BitConverter.ToInt32(DataArray, 0);
+            if (num == Value)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }    
+复制代码
+　　调试输出下结果：
+
+　　
+
+　　可以看到4字节{21,3,0,0}一个整形为789，地址：41632768。
+
+　　十六进制表示0x27B4400：
+
+　　
+
+　　 现在只有一个地址符合，那么这个0x27B4400极有可能是我们所寻找的地址，一般情况下建议照着上面再修改一次，确保0x27B4400的值的确跟随变化了，我这里就不再重复演示了。
+
+　　
+
+　　好了，得到地址不是我们的最终目的，最终目的是修改该地址的数值：
+
+复制代码
+        /// <summary>
+        /// 将自定义数值写入内存
+        /// </summary>
+        /// <param name="Address">内存地址</param>
+        /// <param name="Value">自定义数值</param>
+        /// <returns>是否写入成功</returns>
+        public bool WriteValue2Address(int Address,int Value)
+        {
+            int WriteSize = -1;
+            byte[] WriteArray = BitConverter.GetBytes(Value);
+            if (WriteProcessMemory(hProcess, (IntPtr)Address, WriteArray, 4, out WriteSize))
+            {
+                //如果和实际写入字节数一样提示成功
+                if (WriteSize == 4)
+                {
+                    Console.WriteLine("血量写入成功!");
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
+        }
+复制代码
+　　来看下效果：
+
+　　　　
+
+　　
+
+　　这是原来的界面：
+
+　　　　
+
+　　
+
+　　点击刷新后：
+
+　　　　
+
+　　
+
+　　以上，最基础的一套修改流程就结束了。
